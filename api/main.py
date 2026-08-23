@@ -1,8 +1,13 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+from prometheus_client import Counter, Histogram, Gauge, generate_latest
+from fastapi.responses import Response
+from collections import deque
+from src.fraud_mlops.drift.detector import detect_drift
 import joblib
 import pandas as pd
 import yaml
+
 
 # --------------------------------------------------
 # Create FastAPI application
@@ -26,6 +31,45 @@ with open("params.yaml", "r") as file:
     params = yaml.safe_load(file)
 
 THRESHOLD = params["model"]["threshold"]
+
+
+# --------------------------------------------------
+# Load reference data for drift monitoring
+# --------------------------------------------------
+
+reference_data = pd.read_csv(
+    "data/creditcard.csv"
+).iloc[:500].copy()
+
+
+# --------------------------------------------------
+# Prometheus metrics
+# --------------------------------------------------
+
+prediction_counter = Counter(
+    "fraud_predictions_total",
+    "Total number of predictions",
+    ["prediction"]
+)
+
+prediction_latency = Histogram(
+    "fraud_prediction_latency_seconds",
+    "Prediction latency in seconds"
+)
+
+data_drift_detected = Gauge(
+    "data_drift_detected",
+    "Whether data drift has been detected"
+)
+
+
+# --------------------------------------------------
+# Current data window for drift monitoring
+# --------------------------------------------------
+
+current_data_window = deque(maxlen=100)
+
+
 # --------------------------------------------------
 # Transaction input schema
 # --------------------------------------------------
@@ -92,6 +136,19 @@ def health():
 
 
 # --------------------------------------------------
+# Prometheus metrics endpoint
+# --------------------------------------------------
+
+@app.get("/metrics")
+def metrics():
+
+    return Response(
+        content=generate_latest(),
+        media_type="text/plain"
+    )
+
+
+# --------------------------------------------------
 # Prediction endpoint
 # --------------------------------------------------
 
@@ -138,20 +195,88 @@ def predict(transaction: Transaction):
         ]
     )
 
-    # Apply the same scaler used during training
+    # --------------------------------------------------
+    # Apply scaler
+    # --------------------------------------------------
+
     data_scaled = scaler.transform(data)
 
-    # Get fraud probability
-    probability = model.predict_proba(data_scaled)[0][1]
 
-    # Classification threshold
+    # --------------------------------------------------
+    # Get fraud probability
+    # --------------------------------------------------
+
+    with prediction_latency.time():
+
+        probability = model.predict_proba(
+            data_scaled
+        )[0][1]
+
+
+    # --------------------------------------------------
+    # Classification
+    # --------------------------------------------------
+
     if probability >= THRESHOLD:
+
         prediction = "FRAUD"
+
     else:
+
         prediction = "NORMAL"
 
+
+    # --------------------------------------------------
+    # Update prediction Prometheus metric
+    # --------------------------------------------------
+
+    prediction_counter.labels(
+        prediction=prediction
+    ).inc()
+
+
+    # --------------------------------------------------
+    # Add current transaction to drift window
+    # --------------------------------------------------
+
+    current_data_window.append(
+        transaction_data
+    )
+
+
+    # --------------------------------------------------
+    # Drift detection
+    # --------------------------------------------------
+
+    if len(current_data_window) == 100:
+
+        current_data = pd.DataFrame(
+            list(current_data_window)
+        )
+
+        drift_detected, drift_results = detect_drift(
+            reference_data,
+            current_data
+        )
+
+        if drift_detected:
+
+            data_drift_detected.set(1)
+
+        else:
+
+            data_drift_detected.set(0)
+
+
+    # --------------------------------------------------
+    # Return prediction
+    # --------------------------------------------------
+
     return {
-    "prediction": prediction,
-    "fraud_probability": round(float(probability), 4),
-    "threshold": THRESHOLD
-}
+        "prediction": prediction,
+        "fraud_probability": round(
+            float(probability),
+            4
+        ),
+        "threshold": THRESHOLD
+    }
