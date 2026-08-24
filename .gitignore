@@ -5,10 +5,11 @@ __pycache__/
 .ipynb_checkpoints/
 .vscode/
 models/*.joblib
-data/creditcard.csv
+
 # MLOps generated/storage files
 .dvc-storage/
 mlruns/
 airflow/logs/
 airflow/__pycache__/
 
+fraud-mlops-dvc-b618805f1bfb.json
