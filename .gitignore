@@ -6,3 +6,9 @@ __pycache__/
 .vscode/
 models/*.joblib
 data/creditcard.csv
+# MLOps generated/storage files
+.dvc-storage/
+mlruns/
+airflow/logs/
+airflow/__pycache__/
+
